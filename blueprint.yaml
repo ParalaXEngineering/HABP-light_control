@@ -1,0 +1,148 @@
+blueprint:
+  name: Multi-Gang Switch to Multi-Light with Adaptive Lighting
+  description: |
+    Controls multiple lights with multiple 3-gang switches, handling single/double click, toggling, adaptive lighting, and brightness cycles.
+  domain: automation
+  input:
+    switches:
+      name: 3-Gang Switches
+      description: List of 3-gang switch devices (e.g., ZHA, Zigbee2MQTT, etc).
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+    gangs:
+      name: Gang Numbers
+      description: The gang numbers (1, 2, 3) to use for each switch.
+      selector:
+        select:
+          multiple: true
+          options:
+            - 1
+            - 2
+            - 3
+    event_type:
+      name: Event Type (if not zha_event)
+      description: If your switch fires a different event, change this (default: zha_event)
+      default: zha_event
+      selector:
+        text:
+    lights:
+      name: Lights
+      description: List of lamps controlled (can be light.* or switch.*)
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: light
+            - domain: switch
+    adaptive_switch:
+      name: Adaptive Lighting Switch
+      description: The switch to control Adaptive Lighting (per group).
+      selector:
+        entity:
+          domain: switch
+
+mode: parallel
+
+variables:
+  brightness_levels: [100, 66, 33, 0]
+  # Will store per-light brightness index for cycling
+  brightness_cycle: {}
+
+trigger:
+  - platform: event
+    event_type: !input event_type
+    event_data:
+      # Match on any of the switches/gangs and the press type
+      # This will be refined below in the condition
+
+condition:
+  - condition: template
+    value_template: >-
+      {% set trigger_switch = trigger.event.data.entity_id if trigger.event.data.entity_id is defined else '' %}
+      {% set trigger_gang = trigger.event.data.endpoint_id|string if trigger.event.data.endpoint_id is defined else '' %}
+      {% set allowed_switches = iif(is_list(blueprint.input.switches), blueprint.input.switches, [blueprint.input.switches]) %}
+      {% set allowed_gangs = iif(is_list(blueprint.input.gangs), blueprint.input.gangs, [blueprint.input.gangs]) %}
+      {{ trigger_switch in allowed_switches and trigger_gang in allowed_gangs }}
+
+action:
+  - variables:
+      event_id: "{{ trigger.event.data.command }}"
+      light_list: !input lights
+      adaptive_switch: !input adaptive_switch
+      # This will work for both ZHA and Zigbee2MQTT with minor tweaks
+      # ZHA: "single", "double", etc.  Zigbee2MQTT: e.g. "1_single", "2_double", etc.
+
+  - choose:
+      # SINGLE PRESS: Toggle lights ON/OFF, adaptive lighting ON
+      - conditions: >
+          {{ 'single' in event_id }}
+        sequence:
+          - service: light.toggle
+            target:
+              entity_id: "{{ light_list }}"
+          - service: switch.turn_on
+            target:
+              entity_id: "{{ adaptive_switch }}"
+          - service: persistent_notification.create
+            data:
+              title: "[Lights] Single Press"
+              message: "Toggled lights and enabled adaptive lighting"
+
+      # DOUBLE PRESS: Cycle brightness (100/66/33/OFF), adaptive lighting OFF
+      - conditions: >
+          {{ 'double' in event_id }}
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: "{{ adaptive_switch }}"
+          - repeat:
+              count: "{{ light_list | count }}"
+              sequence:
+                - variables:
+                    light: "{{ light_list[repeat.index-1] }}"
+                    current_state: "{{ states[light].state }}"
+                    last_brightness: >
+                      {{ state_attr(light, 'brightness')|default(255) }}
+                - variables:
+                    new_level: >
+                      {% set levels = [100, 66, 33, 0] %}
+                      {% set idx = levels.index(100) %}
+                      {% if current_state == 'off' %}
+                        100
+                      {% else %}
+                        {% set current = (last_brightness/255*100)|int %}
+                        {% set idx = levels.index(current) if current in levels else 0 %}
+                        {% set next_idx = (idx + 1) % levels|length %}
+                        {{ levels[next_idx] }}
+                      {% endif %}
+                - choose:
+                    - conditions: "{{ new_level == 0 }}"
+                      sequence:
+                        - service: light.turn_off
+                          target:
+                            entity_id: "{{ light }}"
+                    - conditions: "{{ new_level > 0 }}"
+                      sequence:
+                        - service: light.turn_on
+                          target:
+                            entity_id: "{{ light }}"
+                          data:
+                            brightness_pct: "{{ new_level }}"
+          - service: persistent_notification.create
+            data:
+              title: "[Lights] Double Press"
+              message: "Adaptive lighting disabled. Brightness cycled."
+
+      # LONG PRESS (optional): Custom behavior
+      - conditions: >
+          {{ 'long' in event_id }}
+        sequence:
+          - service: persistent_notification.create
+            data:
+              title: "[Lights] Long Press"
+              message: "Long press detected. Add custom action here!"
+
+# END
