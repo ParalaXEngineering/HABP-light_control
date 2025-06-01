@@ -24,7 +24,7 @@ blueprint:
             - 3
     event_type:
       name: Event Type (if not zha_event)
-      description: If your switch fires a different event, change this (default: zha_event)
+      description: If your switch fires a different event, change this (default zha_event)
       default: zha_event
       selector:
         text:
